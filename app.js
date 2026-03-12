@@ -1,1 +1,554 @@
-const canvas=new fabric.Canvas('canvas',{preserveObjectStacking:true,selection:true});const upload=document.getElementById('upload');const profileName=document.getElementById('profileName');const slotButtons=[...document.querySelectorAll('.slot-btn')];const assignBox=document.getElementById('assignBox');const columnTypeSelect=document.getElementById('columnTypeSelect');const btnApplyType=document.getElementById('btnApplyType');const btnCancelType=document.getElementById('btnCancelType');const statusBox=document.getElementById('status');const resultsBody=document.querySelector('#resultsTable tbody');let profiles=JSON.parse(localStorage.getItem('ocrLayoutProfiles')||'null');if(!Array.isArray(profiles)||profiles.length!==4)profiles=[null,null,null,null];let activeSlot=0;let originalImage=null;let imageScale=1;let currentImageDataUrl='';let results=[];let pendingColumn=null;function setStatus(msg){statusBox.textContent=msg;}function persistProfiles(){localStorage.setItem('ocrLayoutProfiles',JSON.stringify(profiles));}function refreshSlotButtons(){slotButtons.forEach((btn,i)=>{btn.classList.toggle('active',i===activeSlot);btn.textContent=(profiles[i]&&profiles[i].name?profiles[i].name:'Bolsillo '+(i+1));});profileName.value=profiles[activeSlot]&&profiles[activeSlot].name?profiles[activeSlot].name:'';}function getPalette(kind,columnType){if(kind==='area')return{stroke:'#fb8c00',fill:'rgba(251,140,0,0.12)'};if(kind==='column'&&columnType==='id')return{stroke:'#1a73e8',fill:'rgba(26,115,232,0.12)'};if(kind==='column'&&columnType==='name')return{stroke:'#2e7d32',fill:'rgba(46,125,50,0.12)'};return{stroke:'#6b7280',fill:'rgba(107,114,128,0.12)'};}function applyRectStyle(rect){const palette=getPalette(rect.kind,rect.columnType);rect.set({fill:palette.fill,stroke:palette.stroke,strokeWidth:2,transparentCorners:false,cornerColor:palette.stroke,cornerStyle:'circle',borderColor:palette.stroke,hasRotatingPoint:false,lockRotation:true});}function makeRect(kind,columnType,props){const rect=new fabric.Rect(Object.assign({left:60,top:60,width:160,height:260,kind:kind,columnType:columnType||null},props||{}));applyRectStyle(rect);return rect;}function clearOverlayRects(){canvas.getObjects().filter(o=>o.type==='rect').forEach(o=>canvas.remove(o));canvas.discardActiveObject();hideAssignBox();canvas.requestRenderAll();}function getAreaObject(){return canvas.getObjects().find(o=>o.type==='rect'&&o.kind==='area')||null;}function getColumnRects(){return canvas.getObjects().filter(o=>o.type==='rect'&&o.kind==='column');}function getColumnObjects(type){return getColumnRects().filter(o=>o.columnType===type);}function getExistingTypes(excludeObj=null){return new Set(getColumnRects().filter(o=>o!==excludeObj&&o.columnType).map(o=>o.columnType));}function getMissingTypes(excludeObj=null){const existing=getExistingTypes(excludeObj);return['id','name'].filter(t=>!existing.has(t));}function addAreaRect(){canvas.getObjects().filter(o=>o.type==='rect'&&o.kind==='area').forEach(o=>canvas.remove(o));const rect=makeRect('area',null,{left:40,top:40,width:320,height:420});canvas.add(rect);canvas.setActiveObject(rect);canvas.requestRenderAll();setStatus('Área de búsqueda creada. Puedes moverla o redimensionarla.');}function showAssignBox(rect){pendingColumn=rect;assignBox.classList.remove('hidden');columnTypeSelect.value='id';setStatus('Selecciona en la lista si la nueva columna corresponde a identificación o nombre.');}function hideAssignBox(){pendingColumn=null;assignBox.classList.add('hidden');}function assignColumnType(rect,type){rect.columnType=type;applyRectStyle(rect);hideAssignBox();canvas.setActiveObject(rect);canvas.requestRenderAll();setStatus('Columna asignada como '+(type==='id'?'Identificación':'Nombre')+'.');}function addGenericColumn(){const columns=getColumnRects();if(columns.length>=2){alert('En esta etapa solo se permiten dos columnas: una de identificación y una de nombre.');return;}const rect=makeRect('column',null,{left:columns.length===0?90:320,top:80,width:180,height:360});canvas.add(rect);canvas.setActiveObject(rect);canvas.requestRenderAll();const missing=getMissingTypes(rect);if(missing.length===1){assignColumnType(rect,missing[0]);setStatus('La segunda columna fue asignada automáticamente como '+(missing[0]==='id'?'Identificación':'Nombre')+'.');}else{showAssignBox(rect);}}function serializeLayout(){return canvas.getObjects().filter(o=>o.type==='rect').map(o=>({kind:o.kind,columnType:o.columnType||null,left:o.left,top:o.top,width:o.width,height:o.height,scaleX:o.scaleX||1,scaleY:o.scaleY||1}));}function renderProfile(slot){canvas.getObjects().filter(o=>o.type==='rect').forEach(o=>canvas.remove(o));hideAssignBox();const profile=profiles[slot];if(!profile||!profile.layout)return;profile.layout.forEach(item=>{const rect=makeRect(item.kind,item.columnType,{left:item.left,top:item.top,width:item.width,height:item.height,scaleX:item.scaleX,scaleY:item.scaleY});canvas.add(rect);});canvas.requestRenderAll();}function boxFromRect(rect){return{x:Math.max(0,Math.round(rect.left/imageScale)),y:Math.max(0,Math.round(rect.top/imageScale)),w:Math.max(1,Math.round((rect.width*(rect.scaleX||1))/imageScale)),h:Math.max(1,Math.round((rect.height*(rect.scaleY||1))/imageScale))};}function intersectBoxes(a,b){const x=Math.max(a.x,b.x);const y=Math.max(a.y,b.y);const r=Math.min(a.x+a.w,b.x+b.w);const bt=Math.min(a.y+a.h,b.y+b.h);return r>x&&bt>y?{x:x,y:y,w:r-x,h:bt-y}:null;}function cropBoxToDataUrl(box){const temp=document.createElement('canvas');temp.width=box.w;temp.height=box.h;const ctx=temp.getContext('2d');ctx.drawImage(originalImage,box.x,box.y,box.w,box.h,0,0,box.w,box.h);return temp.toDataURL('image/png');}async function recognizeLines(box,type){const image=cropBoxToDataUrl(box);const lang=type==='id'?'eng':'spa+eng';const result=await Tesseract.recognize(image,lang,{logger:m=>{if(m.status)setStatus('OCR '+(type==='id'?'identificación':'nombre')+': '+m.status);}});const lines=(result.data&&result.data.lines&&result.data.lines.length?result.data.lines:[{text:result.data.text||'',bbox:{y0:0,y1:box.h},confidence:result.data.confidence||0}]);return lines.map(line=>{const raw=(line.text||'').replace(/\s+/g,' ').trim();const clean=type==='id'?raw.replace(/[^0-9]/g,''):raw;const yLocal=((line.bbox&&line.bbox.y0)||0)+((((line.bbox&&line.bbox.y1)||box.h)-((line.bbox&&line.bbox.y0)||0))/2);return{raw:raw,clean:clean,conf:Math.round(line.confidence||line.conf||result.data.confidence||0),y:box.y+yLocal};}).filter(item=>type==='id'?item.raw.length>0:item.clean.length>0).sort((a,b)=>a.y-b.y);}function pairByY(idLines,nameLines){const ids=[...idLines].sort((a,b)=>a.y-b.y);const names=[...nameLines].sort((a,b)=>a.y-b.y);const used=new Set();const pairs=[];ids.forEach(id=>{let best=-1;let bestDiff=Infinity;names.forEach((name,idx)=>{if(used.has(idx))return;const diff=Math.abs(name.y-id.y);if(diff<bestDiff){bestDiff=diff;best=idx;}});if(best>=0&&bestDiff<120){used.add(best);pairs.push({id:id,name:names[best]});}else{pairs.push({id:id,name:null});}});names.forEach((name,idx)=>{if(!used.has(idx))pairs.push({id:null,name:name});});return pairs.sort((a,b)=>((a.id&&a.id.y)||(a.name&&a.name.y)||0)-((b.id&&b.id.y)||(b.name&&b.name.y)||0));}function renderResults(){resultsBody.innerHTML='';results.forEach(row=>{const tr=document.createElement('tr');['Identificación','Nombre','Perfil usado','Índice de fila','Texto OCR bruto de identificación','Texto OCR bruto de nombre','Confianza OCR identificación','Confianza OCR nombre','Observaciones'].forEach(key=>{const td=document.createElement('td');td.textContent=row[key]??'';tr.appendChild(td);});resultsBody.appendChild(tr);});}function loadImage(file){if(!file)return;const reader=new FileReader();reader.onload=e=>{currentImageDataUrl=e.target.result;const img=new Image();img.onload=()=>{originalImage=img;imageScale=Math.min(1,1000/img.width,700/img.height);canvas.clear();canvas.setDimensions({width:Math.round(img.width*imageScale),height:Math.round(img.height*imageScale)});const bg=new fabric.Image(img,{left:0,top:0,originX:'left',originY:'top',scaleX:imageScale,scaleY:imageScale,selectable:false,evented:false});canvas.setBackgroundImage(bg,canvas.renderAll.bind(canvas));renderProfile(activeSlot);canvas.requestRenderAll();setStatus('Imagen cargada y visible en el lienzo.');};img.onerror=()=>setStatus('No se pudo cargar la imagen.');img.src=currentImageDataUrl;};reader.readAsDataURL(file);}async function runOCR(){if(!originalImage){alert('Primero carga una imagen.');return;}const idRect=getColumnObjects('id')[0];const nameRect=getColumnObjects('name')[0];if(!idRect||!nameRect){alert('Debes tener exactamente una columna de Identificación y una de Nombre antes de ejecutar OCR.');return;}const areaObj=getAreaObject();const areaBox=areaObj?boxFromRect(areaObj):null;let idBox=boxFromRect(idRect);let nameBox=boxFromRect(nameRect);if(areaBox){idBox=intersectBoxes(idBox,areaBox);nameBox=intersectBoxes(nameBox,areaBox);}if(!idBox||!nameBox){alert('Las columnas quedaron fuera del área de búsqueda.');return;}setStatus('Iniciando OCR...');const idLines=await recognizeLines(idBox,'id');const nameLines=await recognizeLines(nameBox,'name');const pairs=pairByY(idLines,nameLines);const profileLabel=(profiles[activeSlot]&&profiles[activeSlot].name)?profiles[activeSlot].name:'Bolsillo '+(activeSlot+1);results=pairs.map((pair,index)=>({'Identificación':pair.id?pair.id.clean:'','Nombre':pair.name?pair.name.clean:'','Perfil usado':profileLabel,'Índice de fila':index+1,'Texto OCR bruto de identificación':pair.id?pair.id.raw:'','Texto OCR bruto de nombre':pair.name?pair.name.raw:'','Confianza OCR identificación':pair.id?pair.id.conf:'','Confianza OCR nombre':pair.name?pair.name.conf:'','Observaciones':pair.id&&pair.name?'Emparejado por cercanía vertical':pair.id?'Falta nombre emparejado':'Falta identificación emparejada'}));renderResults();setStatus('OCR finalizado. Registros detectados: '+results.length);}function exportResults(){if(!results.length){alert('No hay resultados para exportar.');return;}const wb=XLSX.utils.book_new();const ws=XLSX.utils.json_to_sheet(results);XLSX.utils.book_append_sheet(wb,ws,'Resultados');XLSX.writeFile(wb,'resultado_ocr_layout.xlsx');setStatus('Archivo XLSX exportado.');}document.getElementById('btnAddArea').addEventListener('click',addAreaRect);document.getElementById('btnAddColumn').addEventListener('click',addGenericColumn);document.getElementById('btnDeleteSelected').addEventListener('click',()=>{const active=canvas.getActiveObject();if(active&&active.type==='rect'){if(pendingColumn===active)hideAssignBox();canvas.remove(active);canvas.requestRenderAll();setStatus('Elemento eliminado.');}});document.getElementById('btnClearLayout').addEventListener('click',()=>{clearOverlayRects();setStatus('Layout limpiado.');});document.getElementById('btnSaveProfile').addEventListener('click',()=>{const layout=serializeLayout();const typedColumns=layout.filter(item=>item.kind==='column'&&item.columnType);if(typedColumns.length>2){alert('Solo se permiten dos columnas en esta etapa.');return;}profiles[activeSlot]={name:profileName.value.trim()||'Bolsillo '+(activeSlot+1),layout:layout};persistProfiles();refreshSlotButtons();setStatus('Perfil guardado en el bolsillo '+(activeSlot+1)+'.');});document.getElementById('btnRunOCR').addEventListener('click',runOCR);document.getElementById('btnExport').addEventListener('click',exportResults);btnApplyType.addEventListener('click',()=>{if(!pendingColumn)return;assignColumnType(pendingColumn,columnTypeSelect.value);});btnCancelType.addEventListener('click',()=>{if(pendingColumn){canvas.remove(pendingColumn);canvas.requestRenderAll();}hideAssignBox();setStatus('Columna cancelada.');});upload.addEventListener('change',e=>loadImage(e.target.files[0]));slotButtons.forEach(btn=>btn.addEventListener('click',()=>{activeSlot=Number(btn.dataset.slot);refreshSlotButtons();if(originalImage)renderProfile(activeSlot);setStatus('Perfil activo cambiado.');}));refreshSlotButtons();canvas.setDimensions({width:1000,height:700});setStatus('Listo. Carga una imagen para comenzar.');
+const canvas = new fabric.Canvas('canvas', { preserveObjectStacking: true, selection: true });
+
+const upload = document.getElementById('upload');
+const profileName = document.getElementById('profileName');
+const slotButtons = [...document.querySelectorAll('.slot-btn')];
+const assignBox = document.getElementById('assignBox');
+const columnTypeSelect = document.getElementById('columnTypeSelect');
+const btnApplyType = document.getElementById('btnApplyType');
+const btnCancelType = document.getElementById('btnCancelType');
+const statusBox = document.getElementById('status');
+const resultsBody = document.querySelector('#resultsTable tbody');
+
+let profiles = JSON.parse(localStorage.getItem('ocrLayoutProfiles') || 'null');
+if (!Array.isArray(profiles) || profiles.length !== 4) {
+  profiles = [null, null, null, null];
+}
+
+let activeSlot = 0;
+let originalImage = null;
+let imageScale = 1;
+let currentImageDataUrl = '';
+let results = [];
+let pendingColumn = null;
+
+function setStatus(msg) {
+  statusBox.textContent = msg;
+}
+
+function persistProfiles() {
+  localStorage.setItem('ocrLayoutProfiles', JSON.stringify(profiles));
+}
+
+function refreshSlotButtons() {
+  slotButtons.forEach((btn, i) => {
+    btn.classList.toggle('active', i === activeSlot);
+    btn.textContent = (profiles[i] && profiles[i].name) ? profiles[i].name : 'Bolsillo ' + (i + 1);
+  });
+  profileName.value = (profiles[activeSlot] && profiles[activeSlot].name) ? profiles[activeSlot].name : '';
+}
+
+function getPalette(kind, columnType) {
+  if (kind === 'area') {
+    return { stroke: '#fb8c00', fill: 'rgba(251,140,0,0.12)' };
+  }
+  if (kind === 'column' && columnType === 'id') {
+    return { stroke: '#1a73e8', fill: 'rgba(26,115,232,0.12)' };
+  }
+  if (kind === 'column' && columnType === 'name') {
+    return { stroke: '#2e7d32', fill: 'rgba(46,125,50,0.12)' };
+  }
+  return { stroke: '#6b7280', fill: 'rgba(107,114,128,0.12)' };
+}
+
+function applyRectStyle(rect) {
+  const palette = getPalette(rect.kind, rect.columnType);
+  rect.set({
+    fill: palette.fill,
+    stroke: palette.stroke,
+    strokeWidth: 2,
+    transparentCorners: false,
+    cornerColor: palette.stroke,
+    cornerStyle: 'circle',
+    borderColor: palette.stroke,
+    hasRotatingPoint: false,
+    lockRotation: true
+  });
+}
+
+function makeRect(kind, columnType, props) {
+  const rect = new fabric.Rect(Object.assign({
+    left: 60,
+    top: 60,
+    width: 160,
+    height: 260,
+    kind: kind,
+    columnType: columnType || null
+  }, props || {}));
+  applyRectStyle(rect);
+  return rect;
+}
+
+function hideAssignBox() {
+  pendingColumn = null;
+  assignBox.classList.add('hidden');
+}
+
+function clearOverlayRects() {
+  canvas.getObjects().filter(o => o.type === 'rect').forEach(o => canvas.remove(o));
+  canvas.discardActiveObject();
+  hideAssignBox();
+  canvas.requestRenderAll();
+}
+
+function getAreaObject() {
+  return canvas.getObjects().find(o => o.type === 'rect' && o.kind === 'area') || null;
+}
+
+function getColumnRects() {
+  return canvas.getObjects().filter(o => o.type === 'rect' && o.kind === 'column');
+}
+
+function getColumnObjects(type) {
+  return getColumnRects().filter(o => o.columnType === type);
+}
+
+function getExistingTypes(excludeObj = null) {
+  return new Set(
+    getColumnRects()
+      .filter(o => o !== excludeObj && o.columnType)
+      .map(o => o.columnType)
+  );
+}
+
+function getMissingTypes(excludeObj = null) {
+  const existing = getExistingTypes(excludeObj);
+  return ['id', 'name'].filter(t => !existing.has(t));
+}
+
+function addAreaRect() {
+  canvas.getObjects()
+    .filter(o => o.type === 'rect' && o.kind === 'area')
+    .forEach(o => canvas.remove(o));
+
+  const rect = makeRect('area', null, {
+    left: 40,
+    top: 40,
+    width: 320,
+    height: 420
+  });
+
+  canvas.add(rect);
+  canvas.setActiveObject(rect);
+  canvas.requestRenderAll();
+  setStatus('Área de búsqueda creada. Puedes moverla o redimensionarla.');
+}
+
+function showAssignBox(rect) {
+  pendingColumn = rect;
+  assignBox.classList.remove('hidden');
+  columnTypeSelect.value = 'id';
+  setStatus('Selecciona en la lista si la nueva columna corresponde a identificación o nombre.');
+}
+
+function assignColumnType(rect, type) {
+  rect.columnType = type;
+  applyRectStyle(rect);
+  hideAssignBox();
+  canvas.setActiveObject(rect);
+  canvas.requestRenderAll();
+  setStatus('Columna asignada como ' + (type === 'id' ? 'Identificación' : 'Nombre') + '.');
+}
+
+function addGenericColumn() {
+  const columns = getColumnRects();
+  if (columns.length >= 2) {
+    alert('En esta etapa solo se permiten dos columnas: una de identificación y una de nombre.');
+    return;
+  }
+
+  const rect = makeRect('column', null, {
+    left: columns.length === 0 ? 90 : 320,
+    top: 80,
+    width: 180,
+    height: 360
+  });
+
+  canvas.add(rect);
+  canvas.setActiveObject(rect);
+  canvas.requestRenderAll();
+
+  const missing = getMissingTypes(rect);
+
+  if (missing.length === 1) {
+    assignColumnType(rect, missing[0]);
+    setStatus('La segunda columna fue asignada automáticamente como ' + (missing[0] === 'id' ? 'Identificación' : 'Nombre') + '.');
+  } else {
+    showAssignBox(rect);
+  }
+}
+
+function serializeLayout() {
+  return canvas.getObjects()
+    .filter(o => o.type === 'rect')
+    .map(o => ({
+      kind: o.kind,
+      columnType: o.columnType || null,
+      left: o.left,
+      top: o.top,
+      width: o.width,
+      height: o.height,
+      scaleX: o.scaleX || 1,
+      scaleY: o.scaleY || 1
+    }));
+}
+
+function renderProfile(slot) {
+  canvas.getObjects().filter(o => o.type === 'rect').forEach(o => canvas.remove(o));
+  hideAssignBox();
+
+  const profile = profiles[slot];
+  if (!profile || !profile.layout) return;
+
+  profile.layout.forEach(item => {
+    const rect = makeRect(item.kind, item.columnType, {
+      left: item.left,
+      top: item.top,
+      width: item.width,
+      height: item.height,
+      scaleX: item.scaleX,
+      scaleY: item.scaleY
+    });
+    canvas.add(rect);
+  });
+
+  canvas.requestRenderAll();
+}
+
+function boxFromRect(rect) {
+  return {
+    x: Math.max(0, Math.round(rect.left / imageScale)),
+    y: Math.max(0, Math.round(rect.top / imageScale)),
+    w: Math.max(1, Math.round((rect.width * (rect.scaleX || 1)) / imageScale)),
+    h: Math.max(1, Math.round((rect.height * (rect.scaleY || 1)) / imageScale))
+  };
+}
+
+function intersectBoxes(a, b) {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const r = Math.min(a.x + a.w, b.x + b.w);
+  const bt = Math.min(a.y + a.h, b.y + b.h);
+  return r > x && bt > y ? { x, y, w: r - x, h: bt - y } : null;
+}
+
+function cropBoxToDataUrl(box) {
+  const temp = document.createElement('canvas');
+  temp.width = box.w;
+  temp.height = box.h;
+  const ctx = temp.getContext('2d');
+  ctx.drawImage(originalImage, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+  return temp.toDataURL('image/png');
+}
+
+async function recognizeLines(box, type) {
+  const image = cropBoxToDataUrl(box);
+  const lang = type === 'id' ? 'eng' : 'spa+eng';
+
+  const result = await Tesseract.recognize(image, lang, {
+    logger: m => {
+      if (m.status) {
+        setStatus('OCR ' + (type === 'id' ? 'identificación' : 'nombre') + ': ' + m.status);
+      }
+    }
+  });
+
+  const lines = (result.data && result.data.lines && result.data.lines.length)
+    ? result.data.lines
+    : [{
+        text: result.data.text || '',
+        bbox: { y0: 0, y1: box.h },
+        confidence: result.data.confidence || 0
+      }];
+
+  return lines
+    .map(line => {
+      const raw = (line.text || '').replace(/\s+/g, ' ').trim();
+      const clean = type === 'id' ? raw.replace(/[^0-9]/g, '') : raw;
+      const y0 = (line.bbox && line.bbox.y0) || 0;
+      const y1 = (line.bbox && line.bbox.y1) || box.h;
+      const yLocal = y0 + ((y1 - y0) / 2);
+
+      return {
+        raw: raw,
+        clean: clean,
+        conf: Math.round(line.confidence || line.conf || result.data.confidence || 0),
+        y: box.y + yLocal
+      };
+    })
+    .filter(item => type === 'id' ? item.raw.length > 0 : item.clean.length > 0)
+    .sort((a, b) => a.y - b.y);
+}
+
+function pairByY(idLines, nameLines) {
+  const ids = [...idLines].sort((a, b) => a.y - b.y);
+  const names = [...nameLines].sort((a, b) => a.y - b.y);
+  const used = new Set();
+  const pairs = [];
+
+  ids.forEach(id => {
+    let best = -1;
+    let bestDiff = Infinity;
+
+    names.forEach((name, idx) => {
+      if (used.has(idx)) return;
+      const diff = Math.abs(name.y - id.y);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = idx;
+      }
+    });
+
+    if (best >= 0 && bestDiff < 120) {
+      used.add(best);
+      pairs.push({ id, name: names[best] });
+    } else {
+      pairs.push({ id, name: null });
+    }
+  });
+
+  names.forEach((name, idx) => {
+    if (!used.has(idx)) {
+      pairs.push({ id: null, name });
+    }
+  });
+
+  return pairs.sort((a, b) => {
+    const ay = (a.id && a.id.y) || (a.name && a.name.y) || 0;
+    const by = (b.id && b.id.y) || (b.name && b.name.y) || 0;
+    return ay - by;
+  });
+}
+
+function renderResults() {
+  resultsBody.innerHTML = '';
+
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+
+    [
+      'Identificación',
+      'Nombre',
+      'Perfil usado',
+      'Índice de fila',
+      'Texto OCR bruto de identificación',
+      'Texto OCR bruto de nombre',
+      'Confianza OCR identificación',
+      'Confianza OCR nombre',
+      'Observaciones'
+    ].forEach(key => {
+      const td = document.createElement('td');
+      td.textContent = row[key] ?? '';
+      tr.appendChild(td);
+    });
+
+    resultsBody.appendChild(tr);
+  });
+}
+
+function drawLoadedImage(img) {
+  originalImage = img;
+  imageScale = Math.min(1, 1000 / img.width, 700 / img.height);
+
+  canvas.clear();
+  canvas.setDimensions({
+    width: Math.round(img.width * imageScale),
+    height: Math.round(img.height * imageScale)
+  });
+
+  const bg = new fabric.Image(img, {
+    left: 0,
+    top: 0,
+    originX: 'left',
+    originY: 'top',
+    scaleX: imageScale,
+    scaleY: imageScale,
+    selectable: false,
+    evented: false
+  });
+
+  canvas.setBackgroundImage(bg, () => {
+    canvas.requestRenderAll();
+  });
+
+  renderProfile(activeSlot);
+  canvas.requestRenderAll();
+  setStatus('Imagen cargada y visible en el lienzo.');
+}
+
+function loadImage(file) {
+  if (!file) return;
+
+  const reader = new FileReader();
+
+  reader.onload = e => {
+    currentImageDataUrl = e.target.result;
+
+    const img = new Image();
+    img.onload = () => drawLoadedImage(img);
+    img.onerror = () => setStatus('No se pudo cargar la imagen seleccionada.');
+    img.src = currentImageDataUrl;
+  };
+
+  reader.readAsDataURL(file);
+}
+
+async function loadImageFromPath(path) {
+  try {
+    const response = await fetch(path);
+    if (!response.ok) {
+      setStatus('No se encontró la imagen automática: ' + path);
+      return;
+    }
+
+    const blob = await response.blob();
+    const file = new File([blob], path.split('/').pop(), {
+      type: blob.type || 'image/jpeg'
+    });
+
+    loadImage(file);
+  } catch (error) {
+    setStatus('Error cargando imagen automática: ' + error.message);
+  }
+}
+
+async function runOCR() {
+  if (!originalImage) {
+    alert('Primero carga una imagen.');
+    return;
+  }
+
+  const idRect = getColumnObjects('id')[0];
+  const nameRect = getColumnObjects('name')[0];
+
+  if (!idRect || !nameRect) {
+    alert('Debes tener exactamente una columna de Identificación y una de Nombre antes de ejecutar OCR.');
+    return;
+  }
+
+  const areaObj = getAreaObject();
+  const areaBox = areaObj ? boxFromRect(areaObj) : null;
+
+  let idBox = boxFromRect(idRect);
+  let nameBox = boxFromRect(nameRect);
+
+  if (areaBox) {
+    idBox = intersectBoxes(idBox, areaBox);
+    nameBox = intersectBoxes(nameBox, areaBox);
+  }
+
+  if (!idBox || !nameBox) {
+    alert('Las columnas quedaron fuera del área de búsqueda.');
+    return;
+  }
+
+  setStatus('Iniciando OCR...');
+
+  const idLines = await recognizeLines(idBox, 'id');
+  const nameLines = await recognizeLines(nameBox, 'name');
+  const pairs = pairByY(idLines, nameLines);
+
+  const profileLabel = (profiles[activeSlot] && profiles[activeSlot].name)
+    ? profiles[activeSlot].name
+    : 'Bolsillo ' + (activeSlot + 1);
+
+  results = pairs.map((pair, index) => ({
+    'Identificación': pair.id ? pair.id.clean : '',
+    'Nombre': pair.name ? pair.name.clean : '',
+    'Perfil usado': profileLabel,
+    'Índice de fila': index + 1,
+    'Texto OCR bruto de identificación': pair.id ? pair.id.raw : '',
+    'Texto OCR bruto de nombre': pair.name ? pair.name.raw : '',
+    'Confianza OCR identificación': pair.id ? pair.id.conf : '',
+    'Confianza OCR nombre': pair.name ? pair.name.conf : '',
+    'Observaciones': pair.id && pair.name
+      ? 'Emparejado por cercanía vertical'
+      : pair.id
+        ? 'Falta nombre emparejado'
+        : 'Falta identificación emparejada'
+  }));
+
+  renderResults();
+  setStatus('OCR finalizado. Registros detectados: ' + results.length);
+}
+
+function exportResults() {
+  if (!results.length) {
+    alert('No hay resultados para exportar.');
+    return;
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(results);
+  XLSX.utils.book_append_sheet(wb, ws, 'Resultados');
+  XLSX.writeFile(wb, 'resultado_ocr_layout.xlsx');
+  setStatus('Archivo XLSX exportado.');
+}
+
+document.getElementById('btnAddArea').addEventListener('click', addAreaRect);
+document.getElementById('btnAddColumn').addEventListener('click', addGenericColumn);
+
+document.getElementById('btnDeleteSelected').addEventListener('click', () => {
+  const active = canvas.getActiveObject();
+  if (active && active.type === 'rect') {
+    if (pendingColumn === active) hideAssignBox();
+    canvas.remove(active);
+    canvas.requestRenderAll();
+    setStatus('Elemento eliminado.');
+  }
+});
+
+document.getElementById('btnClearLayout').addEventListener('click', () => {
+  clearOverlayRects();
+  setStatus('Layout limpiado.');
+});
+
+document.getElementById('btnSaveProfile').addEventListener('click', () => {
+  const layout = serializeLayout();
+  const typedColumns = layout.filter(item => item.kind === 'column' && item.columnType);
+
+  if (typedColumns.length > 2) {
+    alert('Solo se permiten dos columnas en esta etapa.');
+    return;
+  }
+
+  profiles[activeSlot] = {
+    name: profileName.value.trim() || 'Bolsillo ' + (activeSlot + 1),
+    layout: layout
+  };
+
+  persistProfiles();
+  refreshSlotButtons();
+  setStatus('Perfil guardado en el bolsillo ' + (activeSlot + 1) + '.');
+});
+
+document.getElementById('btnRunOCR').addEventListener('click', runOCR);
+document.getElementById('btnExport').addEventListener('click', exportResults);
+
+btnApplyType.addEventListener('click', () => {
+  if (!pendingColumn) return;
+  assignColumnType(pendingColumn, columnTypeSelect.value);
+});
+
+btnCancelType.addEventListener('click', () => {
+  if (pendingColumn) {
+    canvas.remove(pendingColumn);
+    canvas.requestRenderAll();
+  }
+  hideAssignBox();
+  setStatus('Columna cancelada.');
+});
+
+upload.addEventListener('change', e => loadImage(e.target.files[0]));
+
+slotButtons.forEach(btn => btn.addEventListener('click', () => {
+  activeSlot = Number(btn.dataset.slot);
+  refreshSlotButtons();
+  if (originalImage) renderProfile(activeSlot);
+  setStatus('Perfil activo cambiado.');
+}));
+
+refreshSlotButtons();
+canvas.setDimensions({ width: 1000, height: 700 });
+setStatus('Intentando cargar test.jpeg desde la raíz...');
+loadImageFromPath('test.jpeg');
