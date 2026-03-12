@@ -1,4 +1,11 @@
-const canvas = new fabric.Canvas('canvas', { preserveObjectStacking: true, selection: true });
+const MAX_CANVAS_WIDTH = 1000;
+const MAX_CANVAS_HEIGHT = 700;
+const STORAGE_KEY = 'ocrLayoutProfiles';
+
+const canvas = new fabric.Canvas('canvas', {
+  preserveObjectStacking: true,
+  selection: true
+});
 
 const upload = document.getElementById('upload');
 const profileName = document.getElementById('profileName');
@@ -10,32 +17,32 @@ const btnCancelType = document.getElementById('btnCancelType');
 const statusBox = document.getElementById('status');
 const resultsBody = document.querySelector('#resultsTable tbody');
 
-let profiles = JSON.parse(localStorage.getItem('ocrLayoutProfiles') || 'null');
+let profiles = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
 if (!Array.isArray(profiles) || profiles.length !== 4) {
   profiles = [null, null, null, null];
 }
 
 let activeSlot = 0;
 let originalImage = null;
+let baseImageObject = null;
 let imageScale = 1;
-let currentImageDataUrl = '';
 let results = [];
 let pendingColumn = null;
 
-function setStatus(msg) {
-  statusBox.textContent = msg;
+function setStatus(message) {
+  statusBox.textContent = message;
 }
 
 function persistProfiles() {
-  localStorage.setItem('ocrLayoutProfiles', JSON.stringify(profiles));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
 }
 
 function refreshSlotButtons() {
-  slotButtons.forEach((btn, i) => {
-    btn.classList.toggle('active', i === activeSlot);
-    btn.textContent = (profiles[i] && profiles[i].name) ? profiles[i].name : 'Bolsillo ' + (i + 1);
+  slotButtons.forEach((button, index) => {
+    button.classList.toggle('active', index === activeSlot);
+    button.textContent = profiles[index]?.name || `Bolsillo ${index + 1}`;
   });
-  profileName.value = (profiles[activeSlot] && profiles[activeSlot].name) ? profiles[activeSlot].name : '';
+  profileName.value = profiles[activeSlot]?.name || '';
 }
 
 function getPalette(kind, columnType) {
@@ -66,15 +73,16 @@ function applyRectStyle(rect) {
   });
 }
 
-function makeRect(kind, columnType, props) {
-  const rect = new fabric.Rect(Object.assign({
+function makeRect(kind, columnType, props = {}) {
+  const rect = new fabric.Rect({
     left: 60,
     top: 60,
     width: 160,
     height: 260,
-    kind: kind,
-    columnType: columnType || null
-  }, props || {}));
+    kind,
+    columnType: columnType || null,
+    ...props
+  });
   applyRectStyle(rect);
   return rect;
 }
@@ -84,42 +92,50 @@ function hideAssignBox() {
   assignBox.classList.add('hidden');
 }
 
+function removeOverlayRects() {
+  canvas.getObjects().forEach(obj => {
+    if (obj.type === 'rect') {
+      canvas.remove(obj);
+    }
+  });
+}
+
 function clearOverlayRects() {
-  canvas.getObjects().filter(o => o.type === 'rect').forEach(o => canvas.remove(o));
+  removeOverlayRects();
   canvas.discardActiveObject();
   hideAssignBox();
   canvas.requestRenderAll();
 }
 
 function getAreaObject() {
-  return canvas.getObjects().find(o => o.type === 'rect' && o.kind === 'area') || null;
+  return canvas.getObjects().find(obj => obj.type === 'rect' && obj.kind === 'area') || null;
 }
 
 function getColumnRects() {
-  return canvas.getObjects().filter(o => o.type === 'rect' && o.kind === 'column');
+  return canvas.getObjects().filter(obj => obj.type === 'rect' && obj.kind === 'column');
 }
 
 function getColumnObjects(type) {
-  return getColumnRects().filter(o => o.columnType === type);
+  return getColumnRects().filter(obj => obj.columnType === type);
 }
 
 function getExistingTypes(excludeObj = null) {
   return new Set(
     getColumnRects()
-      .filter(o => o !== excludeObj && o.columnType)
-      .map(o => o.columnType)
+      .filter(obj => obj !== excludeObj && obj.columnType)
+      .map(obj => obj.columnType)
   );
 }
 
 function getMissingTypes(excludeObj = null) {
   const existing = getExistingTypes(excludeObj);
-  return ['id', 'name'].filter(t => !existing.has(t));
+  return ['id', 'name'].filter(type => !existing.has(type));
 }
 
 function addAreaRect() {
   canvas.getObjects()
-    .filter(o => o.type === 'rect' && o.kind === 'area')
-    .forEach(o => canvas.remove(o));
+    .filter(obj => obj.type === 'rect' && obj.kind === 'area')
+    .forEach(obj => canvas.remove(obj));
 
   const rect = makeRect('area', null, {
     left: 40,
@@ -136,8 +152,9 @@ function addAreaRect() {
 
 function showAssignBox(rect) {
   pendingColumn = rect;
+  const missing = getMissingTypes(rect);
+  columnTypeSelect.value = missing.includes('id') ? 'id' : 'name';
   assignBox.classList.remove('hidden');
-  columnTypeSelect.value = 'id';
   setStatus('Selecciona en la lista si la nueva columna corresponde a identificación o nombre.');
 }
 
@@ -147,11 +164,12 @@ function assignColumnType(rect, type) {
   hideAssignBox();
   canvas.setActiveObject(rect);
   canvas.requestRenderAll();
-  setStatus('Columna asignada como ' + (type === 'id' ? 'Identificación' : 'Nombre') + '.');
+  setStatus(`Columna asignada como ${type === 'id' ? 'Identificación' : 'Nombre'}.`);
 }
 
 function addGenericColumn() {
   const columns = getColumnRects();
+
   if (columns.length >= 2) {
     alert('En esta etapa solo se permiten dos columnas: una de identificación y una de nombre.');
     return;
@@ -172,7 +190,7 @@ function addGenericColumn() {
 
   if (missing.length === 1) {
     assignColumnType(rect, missing[0]);
-    setStatus('La segunda columna fue asignada automáticamente como ' + (missing[0] === 'id' ? 'Identificación' : 'Nombre') + '.');
+    setStatus(`La segunda columna fue asignada automáticamente como ${missing[0] === 'id' ? 'Identificación' : 'Nombre'}.`);
   } else {
     showAssignBox(rect);
   }
@@ -180,25 +198,28 @@ function addGenericColumn() {
 
 function serializeLayout() {
   return canvas.getObjects()
-    .filter(o => o.type === 'rect')
-    .map(o => ({
-      kind: o.kind,
-      columnType: o.columnType || null,
-      left: o.left,
-      top: o.top,
-      width: o.width,
-      height: o.height,
-      scaleX: o.scaleX || 1,
-      scaleY: o.scaleY || 1
+    .filter(obj => obj.type === 'rect')
+    .map(obj => ({
+      kind: obj.kind,
+      columnType: obj.columnType || null,
+      left: obj.left,
+      top: obj.top,
+      width: obj.width,
+      height: obj.height,
+      scaleX: obj.scaleX || 1,
+      scaleY: obj.scaleY || 1
     }));
 }
 
 function renderProfile(slot) {
-  canvas.getObjects().filter(o => o.type === 'rect').forEach(o => canvas.remove(o));
+  removeOverlayRects();
   hideAssignBox();
 
   const profile = profiles[slot];
-  if (!profile || !profile.layout) return;
+  if (!profile?.layout) {
+    canvas.requestRenderAll();
+    return;
+  }
 
   profile.layout.forEach(item => {
     const rect = makeRect(item.kind, item.columnType, {
@@ -206,8 +227,8 @@ function renderProfile(slot) {
       top: item.top,
       width: item.width,
       height: item.height,
-      scaleX: item.scaleX,
-      scaleY: item.scaleY
+      scaleX: item.scaleX || 1,
+      scaleY: item.scaleY || 1
     });
     canvas.add(rect);
   });
@@ -228,51 +249,56 @@ function intersectBoxes(a, b) {
   const x = Math.max(a.x, b.x);
   const y = Math.max(a.y, b.y);
   const r = Math.min(a.x + a.w, b.x + b.w);
-  const bt = Math.min(a.y + a.h, b.y + b.h);
-  return r > x && bt > y ? { x, y, w: r - x, h: bt - y } : null;
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+
+  return r > x && bottom > y
+    ? { x, y, w: r - x, h: bottom - y }
+    : null;
 }
 
 function cropBoxToDataUrl(box) {
-  const temp = document.createElement('canvas');
-  temp.width = box.w;
-  temp.height = box.h;
-  const ctx = temp.getContext('2d');
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = box.w;
+  tempCanvas.height = box.h;
+
+  const ctx = tempCanvas.getContext('2d');
   ctx.drawImage(originalImage, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
-  return temp.toDataURL('image/png');
+
+  return tempCanvas.toDataURL('image/png');
 }
 
 async function recognizeLines(box, type) {
-  const image = cropBoxToDataUrl(box);
+  const imageDataUrl = cropBoxToDataUrl(box);
   const lang = type === 'id' ? 'eng' : 'spa+eng';
 
-  const result = await Tesseract.recognize(image, lang, {
-    logger: m => {
-      if (m.status) {
-        setStatus('OCR ' + (type === 'id' ? 'identificación' : 'nombre') + ': ' + m.status);
+  const result = await Tesseract.recognize(imageDataUrl, lang, {
+    logger: msg => {
+      if (msg.status) {
+        setStatus(`OCR ${type === 'id' ? 'identificación' : 'nombre'}: ${msg.status}`);
       }
     }
   });
 
-  const lines = (result.data && result.data.lines && result.data.lines.length)
+  const lines = result.data?.lines?.length
     ? result.data.lines
     : [{
-        text: result.data.text || '',
+        text: result.data?.text || '',
         bbox: { y0: 0, y1: box.h },
-        confidence: result.data.confidence || 0
+        confidence: result.data?.confidence || 0
       }];
 
   return lines
     .map(line => {
       const raw = (line.text || '').replace(/\s+/g, ' ').trim();
       const clean = type === 'id' ? raw.replace(/[^0-9]/g, '') : raw;
-      const y0 = (line.bbox && line.bbox.y0) || 0;
-      const y1 = (line.bbox && line.bbox.y1) || box.h;
+      const y0 = line.bbox?.y0 || 0;
+      const y1 = line.bbox?.y1 || box.h;
       const yLocal = y0 + ((y1 - y0) / 2);
 
       return {
-        raw: raw,
-        clean: clean,
-        conf: Math.round(line.confidence || line.conf || result.data.confidence || 0),
+        raw,
+        clean,
+        conf: Math.round(line.confidence || line.conf || result.data?.confidence || 0),
         y: box.y + yLocal
       };
     })
@@ -283,39 +309,39 @@ async function recognizeLines(box, type) {
 function pairByY(idLines, nameLines) {
   const ids = [...idLines].sort((a, b) => a.y - b.y);
   const names = [...nameLines].sort((a, b) => a.y - b.y);
-  const used = new Set();
+  const usedNames = new Set();
   const pairs = [];
 
-  ids.forEach(id => {
-    let best = -1;
+  ids.forEach(idLine => {
+    let bestIndex = -1;
     let bestDiff = Infinity;
 
-    names.forEach((name, idx) => {
-      if (used.has(idx)) return;
-      const diff = Math.abs(name.y - id.y);
+    names.forEach((nameLine, index) => {
+      if (usedNames.has(index)) return;
+      const diff = Math.abs(nameLine.y - idLine.y);
       if (diff < bestDiff) {
         bestDiff = diff;
-        best = idx;
+        bestIndex = index;
       }
     });
 
-    if (best >= 0 && bestDiff < 120) {
-      used.add(best);
-      pairs.push({ id, name: names[best] });
+    if (bestIndex >= 0 && bestDiff < 120) {
+      usedNames.add(bestIndex);
+      pairs.push({ id: idLine, name: names[bestIndex] });
     } else {
-      pairs.push({ id, name: null });
+      pairs.push({ id: idLine, name: null });
     }
   });
 
-  names.forEach((name, idx) => {
-    if (!used.has(idx)) {
-      pairs.push({ id: null, name });
+  names.forEach((nameLine, index) => {
+    if (!usedNames.has(index)) {
+      pairs.push({ id: null, name: nameLine });
     }
   });
 
   return pairs.sort((a, b) => {
-    const ay = (a.id && a.id.y) || (a.name && a.name.y) || 0;
-    const by = (b.id && b.id.y) || (b.name && b.name.y) || 0;
+    const ay = a.id?.y || a.name?.y || 0;
+    const by = b.id?.y || b.name?.y || 0;
     return ay - by;
   });
 }
@@ -348,15 +374,18 @@ function renderResults() {
 
 function drawLoadedImage(img) {
   originalImage = img;
-  imageScale = Math.min(1, 1000 / img.width, 700 / img.height);
+  imageScale = Math.min(1, MAX_CANVAS_WIDTH / img.naturalWidth, MAX_CANVAS_HEIGHT / img.naturalHeight);
 
   canvas.clear();
+  hideAssignBox();
+  baseImageObject = null;
+
   canvas.setDimensions({
-    width: Math.round(img.width * imageScale),
-    height: Math.round(img.height * imageScale)
+    width: Math.round(img.naturalWidth * imageScale),
+    height: Math.round(img.naturalHeight * imageScale)
   });
 
-  const bg = new fabric.Image(img, {
+  baseImageObject = new fabric.Image(img, {
     left: 0,
     top: 0,
     originX: 'left',
@@ -364,16 +393,32 @@ function drawLoadedImage(img) {
     scaleX: imageScale,
     scaleY: imageScale,
     selectable: false,
-    evented: false
+    evented: false,
+    hoverCursor: 'default'
   });
 
-  canvas.setBackgroundImage(bg, () => {
-    canvas.requestRenderAll();
-  });
-
+  canvas.add(baseImageObject);
+  canvas.sendToBack(baseImageObject);
   renderProfile(activeSlot);
+  canvas.calcOffset();
   canvas.requestRenderAll();
+
   setStatus('Imagen cargada y visible en el lienzo.');
+}
+
+function loadImageFromUrl(url) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+
+  img.onload = () => {
+    drawLoadedImage(img);
+  };
+
+  img.onerror = () => {
+    setStatus(`No se pudo cargar la imagen: ${url}`);
+  };
+
+  img.src = url;
 }
 
 function loadImage(file) {
@@ -381,13 +426,12 @@ function loadImage(file) {
 
   const reader = new FileReader();
 
-  reader.onload = e => {
-    currentImageDataUrl = e.target.result;
+  reader.onload = event => {
+    loadImageFromUrl(event.target.result);
+  };
 
-    const img = new Image();
-    img.onload = () => drawLoadedImage(img);
-    img.onerror = () => setStatus('No se pudo cargar la imagen seleccionada.');
-    img.src = currentImageDataUrl;
+  reader.onerror = () => {
+    setStatus('No se pudo leer el archivo seleccionado.');
   };
 
   reader.readAsDataURL(file);
@@ -395,20 +439,16 @@ function loadImage(file) {
 
 async function loadImageFromPath(path) {
   try {
-    const response = await fetch(path);
+    const response = await fetch(path, { cache: 'no-store' });
+
     if (!response.ok) {
-      setStatus('No se encontró la imagen automática: ' + path);
+      setStatus(`No se encontró la imagen automática: ${path}`);
       return;
     }
 
-    const blob = await response.blob();
-    const file = new File([blob], path.split('/').pop(), {
-      type: blob.type || 'image/jpeg'
-    });
-
-    loadImage(file);
+    loadImageFromUrl(path + '?v=' + Date.now());
   } catch (error) {
-    setStatus('Error cargando imagen automática: ' + error.message);
+    setStatus(`Error cargando imagen automática: ${error.message}`);
   }
 }
 
@@ -448,9 +488,7 @@ async function runOCR() {
   const nameLines = await recognizeLines(nameBox, 'name');
   const pairs = pairByY(idLines, nameLines);
 
-  const profileLabel = (profiles[activeSlot] && profiles[activeSlot].name)
-    ? profiles[activeSlot].name
-    : 'Bolsillo ' + (activeSlot + 1);
+  const profileLabel = profiles[activeSlot]?.name || `Bolsillo ${activeSlot + 1}`;
 
   results = pairs.map((pair, index) => ({
     'Identificación': pair.id ? pair.id.clean : '',
@@ -469,7 +507,7 @@ async function runOCR() {
   }));
 
   renderResults();
-  setStatus('OCR finalizado. Registros detectados: ' + results.length);
+  setStatus(`OCR finalizado. Registros detectados: ${results.length}`);
 }
 
 function exportResults() {
@@ -478,10 +516,12 @@ function exportResults() {
     return;
   }
 
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.json_to_sheet(results);
-  XLSX.utils.book_append_sheet(wb, ws, 'Resultados');
-  XLSX.writeFile(wb, 'resultado_ocr_layout.xlsx');
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(results);
+
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Resultados');
+  XLSX.writeFile(workbook, 'resultado_ocr_layout.xlsx');
+
   setStatus('Archivo XLSX exportado.');
 }
 
@@ -489,10 +529,13 @@ document.getElementById('btnAddArea').addEventListener('click', addAreaRect);
 document.getElementById('btnAddColumn').addEventListener('click', addGenericColumn);
 
 document.getElementById('btnDeleteSelected').addEventListener('click', () => {
-  const active = canvas.getActiveObject();
-  if (active && active.type === 'rect') {
-    if (pendingColumn === active) hideAssignBox();
-    canvas.remove(active);
+  const activeObject = canvas.getActiveObject();
+
+  if (activeObject && activeObject.type === 'rect') {
+    if (pendingColumn === activeObject) {
+      hideAssignBox();
+    }
+    canvas.remove(activeObject);
     canvas.requestRenderAll();
     setStatus('Elemento eliminado.');
   }
@@ -513,13 +556,13 @@ document.getElementById('btnSaveProfile').addEventListener('click', () => {
   }
 
   profiles[activeSlot] = {
-    name: profileName.value.trim() || 'Bolsillo ' + (activeSlot + 1),
-    layout: layout
+    name: profileName.value.trim() || `Bolsillo ${activeSlot + 1}`,
+    layout
   };
 
   persistProfiles();
   refreshSlotButtons();
-  setStatus('Perfil guardado en el bolsillo ' + (activeSlot + 1) + '.');
+  setStatus(`Perfil guardado en el bolsillo ${activeSlot + 1}.`);
 });
 
 document.getElementById('btnRunOCR').addEventListener('click', runOCR);
@@ -539,16 +582,24 @@ btnCancelType.addEventListener('click', () => {
   setStatus('Columna cancelada.');
 });
 
-upload.addEventListener('change', e => loadImage(e.target.files[0]));
+upload.addEventListener('change', event => {
+  loadImage(event.target.files[0]);
+});
 
-slotButtons.forEach(btn => btn.addEventListener('click', () => {
-  activeSlot = Number(btn.dataset.slot);
-  refreshSlotButtons();
-  if (originalImage) renderProfile(activeSlot);
-  setStatus('Perfil activo cambiado.');
-}));
+slotButtons.forEach(button => {
+  button.addEventListener('click', () => {
+    activeSlot = Number(button.dataset.slot);
+    refreshSlotButtons();
+
+    if (originalImage) {
+      renderProfile(activeSlot);
+    }
+
+    setStatus('Perfil activo cambiado.');
+  });
+});
 
 refreshSlotButtons();
-canvas.setDimensions({ width: 1000, height: 700 });
+canvas.setDimensions({ width: MAX_CANVAS_WIDTH, height: MAX_CANVAS_HEIGHT });
 setStatus('Intentando cargar test.jpeg desde la raíz...');
 loadImageFromPath('test.jpeg');
